@@ -11,6 +11,47 @@ function generateId() {
   return Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
 }
 
+const PROVIDER_HEADERS = {
+  "Accept": "application/json, text/plain, */*",
+  "Content-Type": "application/json",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Origin": "https://otnumber.vercel.app",
+  "Referer": "https://otnumber.vercel.app/",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
+async function providerGet(endpoint: string, params?: Record<string, string>) {
+  const url = new URL(`${API_BASE}/${endpoint}`);
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  }
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: PROVIDER_HEADERS,
+  });
+
+  const text = await res.text();
+  let data: any;
+  try { data = JSON.parse(text); } catch { data = text; }
+
+  return { status: res.status, ok: res.ok, data };
+}
+
+async function providerPost(endpoint: string, body: Record<string, any>) {
+  const res = await fetch(`${API_BASE}/${endpoint}`, {
+    method: "POST",
+    headers: PROVIDER_HEADERS,
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  let data: any;
+  try { data = JSON.parse(text); } catch { data = text; }
+
+  return { status: res.status, ok: res.ok, data };
+}
+
 async function sendTelegramMessage(chatId: string, text: string, parseMode?: string) {
   try {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -34,6 +75,54 @@ async function notifyAdmin(number: string, otp: string, source: string, country:
   await sendTelegramMessage(ADMIN_CHAT_ID, msg);
 }
 
+function extractNumber(apiResponse: any): string {
+  if (!apiResponse) return "";
+  if (typeof apiResponse === "string") {
+    try { apiResponse = JSON.parse(apiResponse); } catch { return ""; }
+  }
+  const candidates = [
+    apiResponse.number,
+    apiResponse.phone,
+    apiResponse.data?.number,
+    apiResponse.data?.phone,
+    apiResponse.data?.data?.number,
+    apiResponse.data?.data?.phone,
+    apiResponse.result?.number,
+    apiResponse.result?.phone,
+  ];
+  for (const c of candidates) {
+    if (c && typeof c === "string" && c.length >= 7) return c;
+  }
+  return "";
+}
+
+function extractOtpFromMessages(apiResponse: any, phoneNumber: string): string | null {
+  if (!apiResponse) return null;
+  let messages: any[] = [];
+
+  if (Array.isArray(apiResponse)) {
+    messages = apiResponse;
+  } else if (apiResponse.data && Array.isArray(apiResponse.data)) {
+    messages = apiResponse.data;
+  } else if (apiResponse.messages && Array.isArray(apiResponse.messages)) {
+    messages = apiResponse.messages;
+  } else if (apiResponse.result && Array.isArray(apiResponse.result)) {
+    messages = apiResponse.result;
+  }
+
+  for (const msg of messages) {
+    const phone = msg.phone || msg.number || msg.to || "";
+    const text = msg.message || msg.text || msg.body || msg.content || "";
+    const codeMatch = String(text).match(/(\d{4,6})/);
+    if (codeMatch) {
+      if (!phoneNumber || String(phone).includes(phoneNumber) || phoneNumber.includes(String(phone))) {
+        return codeMatch[1];
+      }
+    }
+  }
+  return null;
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get("action");
@@ -46,19 +135,14 @@ export async function GET(request: NextRequest) {
     const temp = tempStore[id];
 
     try {
-      const consoleRes = await fetch(`${API_BASE}/console`);
-      const consoleData = await consoleRes.json();
-
-      if (consoleData && Array.isArray(consoleData)) {
-        for (const entry of consoleData) {
-          const entryPhone = entry.phone || entry.number || "";
-          const entryMessage = entry.message || entry.text || entry.body || "";
-
-          if (entryPhone.includes(temp.number) || entryPhone.includes(temp.cleanNumber)) {
-            const otpMatch = entryMessage.match(/(\d{4,6})/);
-            if (otpMatch && !temp.otp) {
-              const otpCode = otpMatch[1];
-              temp.otp = otpCode;
+      const endpoints = ["console", "success-otp", "liveaccess"];
+      for (const ep of endpoints) {
+        try {
+          const result = await providerGet(ep, { number: temp.number });
+          if (result.ok && result.data) {
+            const otp = extractOtpFromMessages(result.data, temp.number);
+            if (otp && !temp.otp) {
+              temp.otp = otp;
               temp.status = "otp_received";
               temp.otpReceivedAt = Date.now();
 
@@ -67,20 +151,24 @@ export async function GET(request: NextRequest) {
                 number: temp.number,
                 country: temp.country,
                 countryCode: temp.countryCode,
-                otp: otpCode,
+                otp,
                 source: temp.source,
                 createdAt: temp.createdAt,
                 receivedAt: Date.now(),
               });
 
-              notifyAdmin(temp.number, otpCode, temp.source, temp.country);
-              sendTelegramMessage(temp.chatId?.toString() || "", `🔑 OTP for \`${temp.number}\`:\n\n\`${otpCode}\``, "Markdown");
+              notifyAdmin(temp.number, otp, temp.source, temp.country);
+              if (temp.chatId) {
+                sendTelegramMessage(temp.chatId.toString(), `🔑 OTP for \`${temp.number}\`:\n\n\`${otp}\``, "Markdown");
+              }
             }
           }
+        } catch {
+          // try next endpoint
         }
       }
     } catch (e) {
-      console.error("Console check error:", e);
+      console.error("OTP check error:", e);
     }
 
     if (temp.status === "active" && Date.now() - temp.createdAt > 5 * 60 * 1000) {
@@ -143,6 +231,20 @@ export async function GET(request: NextRequest) {
     });
   }
 
+  if (action === "debugApi") {
+    const endpoint = searchParams.get("endpoint") || "getnum";
+    const method = (searchParams.get("method") || "GET").toUpperCase();
+
+    let result;
+    if (method === "POST") {
+      result = await providerPost(endpoint, { country: "US", service: "general" });
+    } else {
+      result = await providerGet(endpoint, { country: "US" });
+    }
+
+    return NextResponse.json({ success: true, debug: result });
+  }
+
   return NextResponse.json({ success: true, message: "Numbers API active" });
 }
 
@@ -151,56 +253,79 @@ export async function POST(request: NextRequest) {
   const { action, country, source, telegramUserId, chatId } = body;
 
   if (action === "getNumber") {
-    try {
-      const getNumRes = await fetch(`${API_BASE}/getnum`);
-      const numData = await getNumRes.json();
+    const countryName = country || "US";
 
-      const number = numData.number || numData.phone || (numData.data && (numData.data.number || numData.data.phone)) || "";
-      const cleanNumber = number.replace(/[^\d+]/g, "");
+    const strategies = [
+      async () => providerPost("getnum", { country: countryName, service: "general" }),
+      async () => providerPost("getnum", { country: countryName }),
+      async () => providerGet("getnum", { country: countryName }),
+      async () => providerPost("getnum", {}),
+      async () => providerGet("getnum", {}),
+    ];
 
-      if (!number) {
-        return NextResponse.json({ success: false, error: "No numbers available. Try again later." });
-      }
+    let number = "";
+    let lastError = "";
 
-      const id = generateId();
-      const countryName = body.country || "Unknown";
-
-      const tempEntry = {
-        id,
-        number: cleanNumber || number,
-        country: countryName,
-        countryCode: countryName,
-        source: source || "web",
-        telegramUserId: telegramUserId || null,
-        chatId: chatId || null,
-        createdAt: Date.now(),
-        status: "active",
-        otp: null,
-        otpReceivedAt: null,
-      };
-
-      tempStore[id] = tempEntry;
-
+    for (const strategy of strategies) {
       try {
-        await fetch(`${API_BASE}/liveaccess?number=${encodeURIComponent(cleanNumber || number)}`);
-      } catch {
-        // best effort
-      }
+        const result = await strategy();
+        console.log(`API Strategy result: status=${result.status}, data=${JSON.stringify(result.data).substring(0, 200)}`);
 
-      return NextResponse.json({
-        success: true,
-        data: {
-          id: tempEntry.id,
-          number: tempEntry.number,
-          country: tempEntry.country,
-          countryCode: tempEntry.countryCode,
-          status: tempEntry.status,
-          createdAt: tempEntry.createdAt,
-        },
-      });
-    } catch (e) {
-      return NextResponse.json({ success: false, error: "Failed to fetch number from provider." });
+        if (result.ok || (result.status >= 200 && result.status < 300)) {
+          number = extractNumber(result.data);
+          if (number) break;
+        }
+
+        lastError = `Status ${result.status}: ${JSON.stringify(result.data).substring(0, 100)}`;
+      } catch (e: any) {
+        lastError = e.message || "Strategy failed";
+      }
     }
+
+    if (!number) {
+      return NextResponse.json({
+        success: false,
+        error: "Provider API is not responding correctly. Debug: " + lastError,
+      });
+    }
+
+    const cleanNumber = number.replace(/[^\d+]/g, "");
+    const id = generateId();
+
+    const tempEntry = {
+      id,
+      number: cleanNumber || number,
+      country: countryName,
+      countryCode: countryName,
+      source: source || "web",
+      telegramUserId: telegramUserId || null,
+      chatId: chatId || null,
+      createdAt: Date.now(),
+      status: "active",
+      otp: null,
+      otpReceivedAt: null,
+      cleanNumber: cleanNumber,
+    };
+
+    tempStore[id] = tempEntry;
+
+    try {
+      await providerGet("liveaccess", { number: cleanNumber || number });
+    } catch {
+      // best effort
+    }
+
+    return NextResponse.json({
+      success: true,
+      data: {
+        id: tempEntry.id,
+        number: tempEntry.number,
+        country: tempEntry.country,
+        countryCode: tempEntry.countryCode,
+        status: tempEntry.status,
+        createdAt: tempEntry.createdAt,
+      },
+    });
   }
 
   if (action === "reportOtp") {
