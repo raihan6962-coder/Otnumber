@@ -3,33 +3,36 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 const COUNTRIES = [
-  { name: "United States", code: "US", dial: "+1", flag: "🇺🇸" },
-  { name: "United Kingdom", code: "GB", dial: "+44", flag: "🇬🇧" },
-  { name: "Canada", code: "CA", dial: "+1", flag: "🇨🇦" },
-  { name: "Australia", code: "AU", dial: "+61", flag: "🇦🇺" },
-  { name: "Germany", code: "DE", dial: "+49", flag: "🇩🇪" },
-  { name: "France", code: "FR", dial: "+33", flag: "🇫🇷" },
-  { name: "India", code: "IN", dial: "+91", flag: "🇮🇳" },
-  { name: "Brazil", code: "BR", dial: "+55", flag: "🇧🇷" },
-  { name: "Japan", code: "JP", dial: "+81", flag: "🇯🇵" },
-  { name: "Nigeria", code: "NG", dial: "+234", flag: "🇳🇬" },
-  { name: "Philippines", code: "PH", dial: "+63", flag: "🇵🇭" },
-  { name: "Indonesia", code: "ID", dial: "+62", flag: "🇮🇩" },
-  { name: "Pakistan", code: "PK", dial: "+92", flag: "🇵🇰" },
-  { name: "Bangladesh", code: "BD", dial: "+880", flag: "🇧🇩" },
-  { name: "Mexico", code: "MX", dial: "+52", flag: "🇲🇽" },
-  { name: "Turkey", code: "TR", dial: "+90", flag: "🇹🇷" },
-  { name: "Russia", code: "RU", dial: "+7", flag: "🇷🇺" },
-  { name: "Egypt", code: "EG", dial: "+20", flag: "🇪🇬" },
-  { name: "South Africa", code: "ZA", dial: "+27", flag: "🇿🇦" },
-  { name: "Kenya", code: "KE", dial: "+254", flag: "🇰🇪" },
+  { name: "United States", code: "US", dial: "+1", flag: "\u{1F1FA}\u{1F1F8}" },
+  { name: "United Kingdom", code: "GB", dial: "+44", flag: "\u{1F1EC}\u{1F1E7}" },
+  { name: "Canada", code: "CA", dial: "+1", flag: "\u{1F1E8}\u{1F1E6}" },
+  { name: "Australia", code: "AU", dial: "+61", flag: "\u{1F1E6}\u{1F1FA}" },
+  { name: "Germany", code: "DE", dial: "+49", flag: "\u{1F1E9}\u{1F1EA}" },
+  { name: "France", code: "FR", dial: "+33", flag: "\u{1F1EB}\u{1F1F7}" },
+  { name: "India", code: "IN", dial: "+91", flag: "\u{1F1EE}\u{1F1F3}" },
+  { name: "Brazil", code: "BR", dial: "+55", flag: "\u{1F1E7}\u{1F1F7}" },
+  { name: "Japan", code: "JP", dial: "+81", flag: "\u{1F1EF}\u{1F1F5}" },
+  { name: "Nigeria", code: "NG", dial: "+234", flag: "\u{1F1F3}\u{1F1EC}" },
+  { name: "Philippines", code: "PH", dial: "+63", flag: "\u{1F1F5}\u{1F1ED}" },
+  { name: "Indonesia", code: "ID", dial: "+62", flag: "\u{1F1EE}\u{1F1E9}" },
+  { name: "Pakistan", code: "PK", dial: "+92", flag: "\u{1F1F5}\u{1F1F0}" },
+  { name: "Bangladesh", code: "BD", dial: "+880", flag: "\u{1F1E7}\u{1F1E9}" },
+  { name: "Mexico", code: "MX", dial: "+52", flag: "\u{1F1F2}\u{1F1FD}" },
+  { name: "Turkey", code: "TR", dial: "+90", flag: "\u{1F1F9}\u{1F1F7}" },
+  { name: "Russia", code: "RU", dial: "+7", flag: "\u{1F1F7}\u{1F1FA}" },
+  { name: "Egypt", code: "EG", dial: "+20", flag: "\u{1F1EA}\u{1F1EC}" },
+  { name: "South Africa", code: "ZA", dial: "+27", flag: "\u{1F1FF}\u{1F1E6}" },
+  { name: "Kenya", code: "KE", dial: "+254", flag: "\u{1F1F0}\u{1F1EA}" },
 ];
 
 interface TempData {
   id: string;
   number: string;
+  fullNumber?: string;
   country: string;
   countryCode: string;
+  operator?: string;
+  rid?: string;
   status: string;
   otp?: string;
   otpReceivedAt?: number;
@@ -49,6 +52,7 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [polling, setPolling] = useState(false);
   const [toast, setToast] = useState("");
+  const [apiError, setApiError] = useState("");
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
   const showToast = (msg: string) => {
@@ -58,6 +62,7 @@ export default function HomePage() {
 
   const fetchNumber = async (countryCode: string) => {
     setLoading(true);
+    setApiError("");
     try {
       const res = await fetch("/api/numbers", {
         method: "POST",
@@ -70,9 +75,12 @@ export default function HomePage() {
         setView("number");
         startPolling(data.data.id);
       } else {
-        showToast(data.error || "Failed to get number");
+        const errMsg = data.error || "Failed to get number";
+        setApiError(errMsg);
+        showToast(errMsg);
       }
     } catch {
+      setApiError("Network error. Please try again.");
       showToast("Network error. Please try again.");
     }
     setLoading(false);
@@ -103,9 +111,7 @@ export default function HomePage() {
             stopPolling();
           }
         }
-      } catch {
-        // silent fail on poll
-      }
+      } catch {}
     }, 3000);
   }, [tempData?.otp]);
 
@@ -130,12 +136,20 @@ export default function HomePage() {
     showToast("OTP copied!");
   };
 
+  const copyNumber = () => {
+    if (tempData) {
+      navigator.clipboard.writeText(tempData.fullNumber || tempData.number);
+      showToast("Number copied!");
+    }
+  };
+
   const goBack = () => {
     stopPolling();
     setView("select");
     setSelectedCountry(null);
     setTempData(null);
     setOtpMessages([]);
+    setApiError("");
   };
 
   return (
@@ -152,8 +166,8 @@ export default function HomePage() {
             {COUNTRIES.map((c) => (
               <div
                 key={c.code}
-                className={`country-card ${selectedCountry?.code === c.code ? "selected" : ""}`}
-                onClick={() => handleCountrySelect(c)}
+                className={`country-card ${selectedCountry?.code === c.code && loading ? "selected" : ""}`}
+                onClick={() => !loading && handleCountrySelect(c)}
               >
                 <span className="country-flag">{c.flag}</span>
                 <div className="country-info">
@@ -163,6 +177,28 @@ export default function HomePage() {
               </div>
             ))}
           </div>
+
+          {loading && (
+            <div style={{ textAlign: "center", marginTop: "20px" }}>
+              <div className="spinner" style={{ margin: "0 auto" }}></div>
+              <p style={{ color: "var(--text-dim)", marginTop: "10px", fontSize: "0.9rem" }}>Fetching number...</p>
+            </div>
+          )}
+
+          {apiError && (
+            <div style={{
+              marginTop: "20px",
+              padding: "16px 20px",
+              background: "rgba(255, 107, 107, 0.1)",
+              border: "1px solid rgba(255, 107, 107, 0.3)",
+              borderRadius: "12px",
+              color: "var(--danger)",
+              fontSize: "0.9rem",
+              textAlign: "center",
+            }}>
+              {apiError}
+            </div>
+          )}
 
           <div style={{ textAlign: "center", marginTop: "40px", padding: "20px", color: "var(--text-dim)", fontSize: "0.85rem" }}>
             <p>Or use our Telegram Bot: <strong>@TempNumberOTP_bot</strong></p>
@@ -178,16 +214,26 @@ export default function HomePage() {
 
           <div className="number-display">
             <div className="label">Your Temporary Number</div>
-            <div className="number">{tempData.number}</div>
-            <div className="country-badge">
-              {selectedCountry?.flag} {selectedCountry?.name} ({selectedCountry?.dial})
+            <div className="number">{tempData.fullNumber || tempData.number}</div>
+            <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap" }}>
+              <div className="country-badge">
+                {selectedCountry?.flag} {tempData.country || selectedCountry?.name}
+              </div>
+              {tempData.operator && (
+                <div className="country-badge">
+                  📡 {tempData.operator}
+                </div>
+              )}
             </div>
+            <button className="btn btn-secondary btn-small" style={{ marginTop: "16px" }} onClick={copyNumber}>
+              Copy Number
+            </button>
           </div>
 
           <div className="status-bar">
             <div className="status-dot" style={{ background: polling ? "var(--success)" : "var(--danger)" }}></div>
             {tempData.status === "expired" ? (
-              <span>This number has expired.</span>
+              <span>This number has expired. <button className="back-btn" onClick={goBack} style={{ display: "inline", margin: 0, padding: 0 }}>Get new number</button></span>
             ) : polling ? (
               <span>Waiting for OTP messages...</span>
             ) : (
@@ -214,13 +260,7 @@ export default function HomePage() {
                     <button className="btn btn-primary btn-small" onClick={() => copyOtp(msg.code)}>
                       Copy OTP
                     </button>
-                    <button
-                      className="btn btn-secondary btn-small"
-                      onClick={() => {
-                        navigator.clipboard.writeText(tempData.number);
-                        showToast("Number copied!");
-                      }}
-                    >
+                    <button className="btn btn-secondary btn-small" onClick={copyNumber}>
                       Copy Number
                     </button>
                   </div>
