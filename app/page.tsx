@@ -77,11 +77,9 @@ export default function HomePage() {
       } else {
         const errMsg = data.error || "Failed to get number";
         setApiError(errMsg);
-        showToast(errMsg);
       }
     } catch {
       setApiError("Network error. Please try again.");
-      showToast("Network error. Please try again.");
     }
     setLoading(false);
   };
@@ -121,12 +119,11 @@ export default function HomePage() {
   };
 
   useEffect(() => {
-    return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
-    };
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
   }, []);
 
   const handleCountrySelect = (country: typeof COUNTRIES[0]) => {
+    if (loading) return;
     setSelectedCountry(country);
     fetchNumber(country.code);
   };
@@ -167,7 +164,7 @@ export default function HomePage() {
               <div
                 key={c.code}
                 className={`country-card ${selectedCountry?.code === c.code && loading ? "selected" : ""}`}
-                onClick={() => !loading && handleCountrySelect(c)}
+                onClick={() => handleCountrySelect(c)}
               >
                 <span className="country-flag">{c.flag}</span>
                 <div className="country-info">
@@ -181,20 +178,15 @@ export default function HomePage() {
           {loading && (
             <div style={{ textAlign: "center", marginTop: "20px" }}>
               <div className="spinner" style={{ margin: "0 auto" }}></div>
-              <p style={{ color: "var(--text-dim)", marginTop: "10px", fontSize: "0.9rem" }}>Fetching number...</p>
+              <p style={{ color: "var(--text-dim)", marginTop: "10px", fontSize: "0.9rem" }}>Allocating number...</p>
             </div>
           )}
 
           {apiError && (
             <div style={{
-              marginTop: "20px",
-              padding: "16px 20px",
-              background: "rgba(255, 107, 107, 0.1)",
-              border: "1px solid rgba(255, 107, 107, 0.3)",
-              borderRadius: "12px",
-              color: "var(--danger)",
-              fontSize: "0.9rem",
-              textAlign: "center",
+              marginTop: "20px", padding: "16px 20px",
+              background: "rgba(255, 107, 107, 0.1)", border: "1px solid rgba(255, 107, 107, 0.3)",
+              borderRadius: "12px", color: "var(--danger)", fontSize: "0.9rem", textAlign: "center",
             }}>
               {apiError}
             </div>
@@ -220,9 +212,7 @@ export default function HomePage() {
                 {selectedCountry?.flag} {tempData.country || selectedCountry?.name}
               </div>
               {tempData.operator && (
-                <div className="country-badge">
-                  📡 {tempData.operator}
-                </div>
+                <div className="country-badge">📡 {tempData.operator}</div>
               )}
             </div>
             <button className="btn btn-secondary btn-small" style={{ marginTop: "16px" }} onClick={copyNumber}>
@@ -242,9 +232,7 @@ export default function HomePage() {
           </div>
 
           <div className="otp-section">
-            <h2>
-              <span>&#128231;</span> Inbox / OTP
-            </h2>
+            <h2><span>&#128231;</span> Inbox / OTP</h2>
             {otpMessages.length === 0 ? (
               <div className="empty-state">
                 <div className="icon">&#128233;</div>
@@ -257,12 +245,8 @@ export default function HomePage() {
                   <div className="otp-code">{msg.code}</div>
                   <div className="otp-time">Received at {msg.time}</div>
                   <div className="otp-actions">
-                    <button className="btn btn-primary btn-small" onClick={() => copyOtp(msg.code)}>
-                      Copy OTP
-                    </button>
-                    <button className="btn btn-secondary btn-small" onClick={copyNumber}>
-                      Copy Number
-                    </button>
+                    <button className="btn btn-primary btn-small" onClick={() => copyOtp(msg.code)}>Copy OTP</button>
+                    <button className="btn btn-secondary btn-small" onClick={copyNumber}>Copy Number</button>
                   </div>
                 </div>
               ))

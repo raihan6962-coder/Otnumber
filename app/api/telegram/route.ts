@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 const BOT_TOKEN = "8645181362:AAG1v_kyYMs9yCdsJ88otpq4T07H3q5IsXY";
 const ADMIN_CHAT_ID = "7259050773";
 const API_BASE = "https://api.2oo9.cloud/MXS47FLFX0U/tnezs/@public/api";
-const API_KEY = process.env.API_2OO9_KEY || "";
+const API_KEY = "MZP5U87OSW1";
 
 const COUNTRIES = [
   { name: "United States", code: "US", dial: "+1", flag: "\u{1F1FA}\u{1F1F8}" },
@@ -34,19 +34,17 @@ interface UserSession {
   countryCode?: string;
   number?: string;
   fullNumber?: string;
+  cleanNumber?: string;
   rid?: string;
 }
 
 const userSessions: Record<number, UserSession> = {};
 
-function getHeaders() {
-  const h: Record<string, string> = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-  };
-  if (API_KEY) h["mauthapi"] = API_KEY;
-  return h;
-}
+const apiHeaders = {
+  "Accept": "application/json",
+  "Content-Type": "application/json",
+  "mauthapi": API_KEY,
+};
 
 async function tg(method: string, body: any) {
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
@@ -58,26 +56,25 @@ async function tg(method: string, body: any) {
 }
 
 async function apiGet(endpoint: string) {
-  const res = await fetch(`${API_BASE}/${endpoint}`, { method: "GET", headers: getHeaders() });
+  const res = await fetch(`${API_BASE}/${endpoint}`, { method: "GET", headers: apiHeaders });
   return res.json().catch(() => null);
 }
 
 async function apiPost(endpoint: string, body: any) {
   const res = await fetch(`${API_BASE}/${endpoint}`, {
-    method: "POST",
-    headers: getHeaders(),
-    body: JSON.stringify(body),
+    method: "POST", headers: apiHeaders, body: JSON.stringify(body),
   });
   return res.json().catch(() => null);
 }
 
-async function sendAdminAlert(number: string, otp: string, country: string) {
+async function sendAdminAlert(number: string, otp: string, country: string, sid?: string) {
   const msg = `🔔 *OTP Received Alert*
 
 📞 *Number:* \`${number}\`
 🔑 *OTP:* \`${otp}\`
 🌍 *Country:* ${country}
 📡 *Source:* Bot
+🏷️ *Service:* ${sid || "N/A"}
 🕐 *Time:* ${new Date().toISOString()}`;
   await tg("sendMessage", { chat_id: ADMIN_CHAT_ID, text: msg, parse_mode: "Markdown" });
 }
@@ -89,13 +86,33 @@ async function pollForOtp(number: string, cleanNum: string, chatId: number, coun
   }
 
   try {
-    const consoleData = await apiGet("console");
-    if (consoleData?.meta?.code === 200 && consoleData?.data?.hits) {
-      for (const hit of consoleData.data.hits) {
-        const hitRange = hit.range || "";
-        const hitNum = hitRange.replace(/XXX$/, "");
-        if (cleanNum.includes(hitNum) || hitNum.includes(cleanNum) || number.includes(hitNum)) {
+    const consoleRes = await apiGet("console");
+    if (consoleRes?.meta?.code === 200 && consoleRes?.data?.hits) {
+      for (const hit of consoleRes.data.hits) {
+        const hitRange = (hit.range || "").replace(/XXX$/, "");
+        if (cleanNum.includes(hitRange) || hitRange.includes(cleanNum) || number.includes(hitRange)) {
           const otpMatch = (hit.message || "").match(/(\d{4,6})/);
+          if (otpMatch) {
+            await tg("sendMessage", {
+              chat_id: chatId,
+              text: `✅ *OTP Received!*
+
+Number: \`${number}\`
+OTP: \`${otpMatch[1]}\``,
+              parse_mode: "Markdown",
+            });
+            await sendAdminAlert(number, otpMatch[1], countryName, hit.sid);
+            return;
+          }
+        }
+      }
+    }
+
+    const successRes = await apiGet("success-otp");
+    if (successRes?.meta?.code === 200 && successRes?.data?.otps) {
+      for (const entry of successRes.data.otps) {
+        if (entry.number === cleanNum || cleanNum.includes(entry.number)) {
+          const otpMatch = (entry.message || "").match(/(\d{4,6})/);
           if (otpMatch) {
             await tg("sendMessage", {
               chat_id: chatId,
@@ -132,11 +149,6 @@ export async function POST(request: NextRequest) {
       await tg("answerCallbackQuery", { callback_query_id: cq.id });
 
       if (data === "get_number") {
-        if (!API_KEY) {
-          await tg("sendMessage", { chat_id: chatId, text: "❌ API key not configured. Contact admin." });
-          return NextResponse.json({ ok: true });
-        }
-
         const keyboard = [];
         for (let i = 0; i < COUNTRIES.length; i += 3) {
           const row = COUNTRIES.slice(i, i + 3).map((c) => ({
@@ -169,19 +181,20 @@ export async function POST(request: NextRequest) {
           text: `⏳ Fetching a ${country.flag} ${country.name} number...`,
         });
 
+        // POST /getnum - allocate number from range
         const result = await apiPost("getnum", { rid: "26134" });
 
         if (result?.meta?.code === 200 && result?.data) {
           const d = result.data;
-          const number = d.no_plus_number || d.national_number || "";
-          const fullNumber = d.full_number || `+${number}`;
+          const cleanNum = d.no_plus_number || d.national_number || "";
+          const fullNumber = d.full_number || `+${cleanNum}`;
 
           userSessions[chatId] = {
             step: "waiting_otp",
             country: country.name,
             countryCode: country.code,
             number: fullNumber,
-            cleanNumber: number,
+            cleanNumber: cleanNum,
             rid: "26134",
           };
 
@@ -196,12 +209,13 @@ Operator: ${d.operator || "N/A"}
             parse_mode: "Markdown",
           });
 
-          pollForOtp(fullNumber, number, chatId, country.name);
+          pollForOtp(fullNumber, cleanNum, chatId, country.name);
         } else {
           const errMsg = result?.message || "Failed to get number";
+          const errCode = result?.meta?.code || "";
           await tg("sendMessage", {
             chat_id: chatId,
-            text: `❌ ${errMsg}\n\nTry another country or try again later.`,
+            text: `❌ ${errMsg} (code: ${errCode})\n\nTry another country or try again later.`,
           });
         }
 
@@ -228,7 +242,6 @@ Click the button below to get started:`,
           inline_keyboard: [[{ text: "\u{1F522} Get a Number", callback_data: "get_number" }]],
         },
       });
-
       userSessions[chatId] = { step: "idle" };
       return NextResponse.json({ ok: true });
     }
@@ -259,9 +272,5 @@ Click the button below to get started:`,
 }
 
 export async function GET() {
-  return NextResponse.json({
-    status: "ok",
-    message: "Telegram webhook endpoint is active",
-    apiKeyConfigured: !!API_KEY,
-  });
+  return NextResponse.json({ status: "ok", message: "Telegram webhook active" });
 }
