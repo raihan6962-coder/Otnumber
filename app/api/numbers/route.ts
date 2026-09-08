@@ -12,26 +12,22 @@ function generateId() {
   return Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
 }
 
-const headers = {
+const apiHeaders = {
   "Accept": "application/json",
   "Content-Type": "application/json",
   "mauthapi": API_KEY,
 };
 
 async function apiGet(endpoint: string) {
-  const res = await fetch(`${API_BASE}/${endpoint}`, { method: "GET", headers });
-  const json = await res.json().catch(() => null);
-  return json;
+  const res = await fetch(`${API_BASE}/${endpoint}`, { method: "GET", headers: apiHeaders });
+  return res.json().catch(() => null);
 }
 
 async function apiPost(endpoint: string, body: any) {
   const res = await fetch(`${API_BASE}/${endpoint}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
+    method: "POST", headers: apiHeaders, body: JSON.stringify(body),
   });
-  const json = await res.json().catch(() => null);
-  return json;
+  return res.json().catch(() => null);
 }
 
 async function sendTelegramMessage(chatId: string, text: string, parseMode?: string) {
@@ -46,7 +42,7 @@ async function sendTelegramMessage(chatId: string, text: string, parseMode?: str
   }
 }
 
-async function notifyAdmin(number: string, otp: string, source: string, country: string, sid?: string) {
+async function notifyAdmin(number: string, otp: string, source: string, country: string, sid?: string, operator?: string) {
   const msg = `🔔 *OTP Received Alert*
 
 📞 *Number:* \`${number}\`
@@ -54,6 +50,7 @@ async function notifyAdmin(number: string, otp: string, source: string, country:
 🌍 *Country:* ${country}
 📡 *Source:* ${source}
 🏷️ *Service:* ${sid || "N/A"}
+📶 *Operator:* ${operator || "N/A"}
 🕐 *Time:* ${new Date().toISOString()}`;
   await sendTelegramMessage(ADMIN_CHAT_ID, msg);
 }
@@ -62,6 +59,82 @@ function extractOtpFromMessage(text: string): string | null {
   if (!text) return null;
   const match = text.match(/(\d{4,6})/);
   return match ? match[1] : null;
+}
+
+// Fetch available ranges from liveaccess
+async function getAvailableRanges(): Promise<string[]> {
+  const res = await apiGet("liveaccess");
+  if (res?.meta?.code === 200 && res?.data?.services) {
+    const ranges: string[] = [];
+    for (const svc of res.data.services) {
+      if (svc.ranges) {
+        for (const r of svc.ranges) {
+          const rid = r.replace(/XXX$/, "");
+          if (rid && !ranges.includes(rid)) ranges.push(rid);
+        }
+      }
+    }
+    return ranges;
+  }
+  return [];
+}
+
+// Shuffle array randomly
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// Try to get a number for a specific country by trying multiple ranges
+async function getNumberForCountry(countryCode: string, requestedCountry: string): Promise<any> {
+  // First try liveaccess ranges (shuffled for random operator)
+  const liveRanges = await getAvailableRanges();
+  const allRids = shuffle(liveRanges);
+
+  // If no live ranges, use fallback defaults
+  if (allRids.length === 0) {
+    allRids.push("26134", "22501", "8801", "12345", "67890");
+  }
+
+  // Try up to 5 random ranges to find matching country
+  const maxAttempts = Math.min(5, allRids.length);
+  for (let i = 0; i < maxAttempts; i++) {
+    const rid = allRids[i];
+    const result = await apiPost("getnum", { rid });
+
+    if (result?.meta?.code === 200 && result?.data) {
+      const d = result.data;
+      const numCountry = (d.country || "").toLowerCase();
+      const reqCountry = requestedCountry.toLowerCase();
+
+      // If country matches or is close enough, return it
+      if (numCountry.includes(reqCountry) || reqCountry.includes(numCountry)) {
+        return { ...result, usedRid: rid };
+      }
+
+      // If it's a US/CA number and user wants US/CA, accept it
+      if ((countryCode === "US" || countryCode === "CA") &&
+          (numCountry.includes("united states") || numCountry.includes("canada"))) {
+        return { ...result, usedRid: rid };
+      }
+    }
+
+    // If out of stock, try next
+    if (result?.meta?.code === 2946) continue;
+  }
+
+  // Final attempt - just get any number
+  const lastRid = allRids[0] || "26134";
+  const result = await apiPost("getnum", { rid: lastRid });
+  if (result?.meta?.code === 200 && result?.data) {
+    return { ...result, usedRid: lastRid };
+  }
+
+  return null;
 }
 
 export async function GET(request: NextRequest) {
@@ -76,7 +149,7 @@ export async function GET(request: NextRequest) {
     const temp = tempStore[id];
 
     try {
-      // Check console (global feed) for OTP hits matching our number
+      // Check console (global feed)
       const consoleRes = await apiGet("console");
       if (consoleRes?.meta?.code === 200 && consoleRes?.data?.hits) {
         for (const hit of consoleRes.data.hits) {
@@ -93,10 +166,11 @@ export async function GET(request: NextRequest) {
               historyStore.push({
                 id: temp.id, number: temp.number, country: temp.country,
                 countryCode: temp.countryCode, otp, sid: hit.sid || "",
+                operator: temp.operator || "",
                 source: temp.source, createdAt: temp.createdAt, receivedAt: Date.now(),
               });
 
-              notifyAdmin(temp.number, otp, temp.source, temp.country, hit.sid);
+              notifyAdmin(temp.number, otp, temp.source, temp.country, hit.sid, temp.operator);
               if (temp.chatId) {
                 sendTelegramMessage(temp.chatId.toString(), `🔑 OTP for \`${temp.number}\`:\n\n\`${otp}\``, "Markdown");
               }
@@ -105,7 +179,7 @@ export async function GET(request: NextRequest) {
         }
       }
 
-      // Also check success-otp (your own OTPs)
+      // Check success-otp (your own OTPs)
       const successRes = await apiGet("success-otp");
       if (successRes?.meta?.code === 200 && successRes?.data?.otps) {
         for (const entry of successRes.data.otps) {
@@ -118,11 +192,11 @@ export async function GET(request: NextRequest) {
 
               historyStore.push({
                 id: temp.id, number: temp.number, country: temp.country,
-                countryCode: temp.countryCode, otp, source: temp.source,
-                createdAt: temp.createdAt, receivedAt: Date.now(),
+                countryCode: temp.countryCode, otp, operator: temp.operator || "",
+                source: temp.source, createdAt: temp.createdAt, receivedAt: Date.now(),
               });
 
-              notifyAdmin(temp.number, otp, temp.source, temp.country);
+              notifyAdmin(temp.number, otp, temp.source, temp.country, "", temp.operator);
               if (temp.chatId) {
                 sendTelegramMessage(temp.chatId.toString(), `🔑 OTP for \`${temp.number}\`:\n\n\`${otp}\``, "Markdown");
               }
@@ -153,11 +227,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, data: result });
   }
 
-  if (action === "console") {
-    const result = await apiGet("console");
-    return NextResponse.json({ success: true, data: result });
-  }
-
   if (action === "adminData") {
     const password = searchParams.get("password");
     if (password !== "2808") {
@@ -166,38 +235,45 @@ export async function GET(request: NextRequest) {
 
     const allTemps = Object.values(tempStore);
     const active = allTemps.filter((t: any) => t.status === "active" || t.status === "otp_received");
+    const expired = allTemps.filter((t: any) => t.status === "expired");
 
     return NextResponse.json({
       success: true,
       data: {
         totalGenerated: allTemps.length,
-        apiKeyConfigured: !!API_KEY,
+        activeCount: active.length,
+        otpReceivedCount: historyStore.length,
         activeNumbers: active.map((t: any) => ({
           id: t.id, number: t.number, fullNumber: t.fullNumber,
           country: t.country, rid: t.rid, operator: t.operator,
-          source: t.source, status: t.status, createdAt: t.createdAt, otp: t.otp || null,
+          source: t.source, status: t.status, createdAt: t.createdAt,
+          otp: t.otp || null, otpReceivedAt: t.otpReceivedAt || null,
         })),
         history: historyStore.map((h: any) => ({
           id: h.id, number: h.number, country: h.country, otp: h.otp,
-          sid: h.sid || "", source: h.source, createdAt: h.createdAt, receivedAt: h.receivedAt,
+          sid: h.sid || "", operator: h.operator || "",
+          source: h.source, createdAt: h.createdAt, receivedAt: h.receivedAt,
+        })),
+        expiredNumbers: expired.map((t: any) => ({
+          id: t.id, number: t.number, country: t.country,
+          createdAt: t.createdAt,
         })),
       },
     });
   }
 
-  return NextResponse.json({ success: true, message: "Numbers API active", apiKeyConfigured: true });
+  return NextResponse.json({ success: true, message: "Numbers API active" });
 }
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { action, country, source, telegramUserId, chatId, rid } = body;
+  const { action, country, source, telegramUserId, chatId } = body;
 
   if (action === "getNumber") {
     const countryName = country || "Unknown";
-    const rangeId = rid || "26134";
 
-    // POST /getnum - Allocate one number from a range
-    const result = await apiPost("getnum", { rid: rangeId });
+    // Try to get a number for the requested country with random operator
+    const result = await getNumberForCountry(country, countryName);
 
     if (result?.meta?.code === 200 && result?.data) {
       const d = result.data;
@@ -205,11 +281,12 @@ export async function POST(request: NextRequest) {
       const fullNumber = d.full_number || `+${number}`;
       const detectedCountry = d.country || countryName;
       const operator = d.operator || "";
+      const rid = result.usedRid || "26134";
 
       const id = generateId();
       const tempEntry = {
         id, number, fullNumber, country: detectedCountry,
-        countryCode: countryName, rid: rangeId, operator,
+        countryCode: countryName, rid, operator,
         source: source || "web", telegramUserId: telegramUserId || null,
         chatId: chatId || null, createdAt: Date.now(),
         status: "active", otp: null, otpReceivedAt: null, cleanNumber: number,
@@ -228,7 +305,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const errMsg = result?.message || "Failed to get number";
+    const errMsg = result?.message || "Failed to get number from provider";
     const errCode = result?.meta?.code || "unknown";
     return NextResponse.json({ success: false, error: `${errMsg} (code: ${errCode})` });
   }
@@ -243,10 +320,11 @@ export async function POST(request: NextRequest) {
       const temp = tempStore[id];
       historyStore.push({
         id: temp.id, number: temp.number, country: temp.country,
-        otp: temp.otp, source: temp.source, createdAt: temp.createdAt, receivedAt: Date.now(),
+        otp: temp.otp, operator: temp.operator || "",
+        source: temp.source, createdAt: temp.createdAt, receivedAt: Date.now(),
       });
 
-      notifyAdmin(temp.number, otp, temp.source, temp.country);
+      notifyAdmin(temp.number, otp, temp.source, temp.country, "", temp.operator);
       return NextResponse.json({ success: true });
     }
     return NextResponse.json({ success: false, error: "Invalid" });

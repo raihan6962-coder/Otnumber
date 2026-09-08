@@ -35,7 +35,7 @@ interface UserSession {
   number?: string;
   fullNumber?: string;
   cleanNumber?: string;
-  rid?: string;
+  operator?: string;
 }
 
 const userSessions: Record<number, UserSession> = {};
@@ -67,14 +67,80 @@ async function apiPost(endpoint: string, body: any) {
   return res.json().catch(() => null);
 }
 
-async function sendAdminAlert(number: string, otp: string, country: string, sid?: string) {
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+async function getAvailableRanges(): Promise<string[]> {
+  const res = await apiGet("liveaccess");
+  if (res?.meta?.code === 200 && res?.data?.services) {
+    const ranges: string[] = [];
+    for (const svc of res.data.services) {
+      if (svc.ranges) {
+        for (const r of svc.ranges) {
+          const rid = r.replace(/XXX$/, "");
+          if (rid && !ranges.includes(rid)) ranges.push(rid);
+        }
+      }
+    }
+    return ranges;
+  }
+  return [];
+}
+
+async function getNumberForCountry(countryCode: string, requestedCountry: string): Promise<any> {
+  const liveRanges = await getAvailableRanges();
+  const allRids = shuffle(liveRanges);
+
+  if (allRids.length === 0) {
+    allRids.push("26134", "22501", "8801");
+  }
+
+  const maxAttempts = Math.min(5, allRids.length);
+  for (let i = 0; i < maxAttempts; i++) {
+    const rid = allRids[i];
+    const result = await apiPost("getnum", { rid });
+
+    if (result?.meta?.code === 200 && result?.data) {
+      const d = result.data;
+      const numCountry = (d.country || "").toLowerCase();
+      const reqCountry = requestedCountry.toLowerCase();
+
+      if (numCountry.includes(reqCountry) || reqCountry.includes(numCountry)) {
+        return { ...result, usedRid: rid };
+      }
+
+      if ((countryCode === "US" || countryCode === "CA") &&
+          (numCountry.includes("united states") || numCountry.includes("canada"))) {
+        return { ...result, usedRid: rid };
+      }
+    }
+
+    if (result?.meta?.code === 2946) continue;
+  }
+
+  const lastRid = allRids[0] || "26134";
+  const result = await apiPost("getnum", { rid: lastRid });
+  if (result?.meta?.code === 200 && result?.data) {
+    return { ...result, usedRid: lastRid };
+  }
+
+  return null;
+}
+
+async function sendAdminAlert(number: string, otp: string, country: string, sid?: string, operator?: string) {
   const msg = `🔔 *OTP Received Alert*
 
 📞 *Number:* \`${number}\`
 🔑 *OTP:* \`${otp}\`
 🌍 *Country:* ${country}
 📡 *Source:* Bot
-🏷️ *Service:* ${sid || "N/A"}
+📶 *Operator:* ${operator || "N/A"}
 🕐 *Time:* ${new Date().toISOString()}`;
   await tg("sendMessage", { chat_id: ADMIN_CHAT_ID, text: msg, parse_mode: "Markdown" });
 }
@@ -181,8 +247,7 @@ export async function POST(request: NextRequest) {
           text: `⏳ Fetching a ${country.flag} ${country.name} number...`,
         });
 
-        // POST /getnum - allocate number from range
-        const result = await apiPost("getnum", { rid: "26134" });
+        const result = await getNumberForCountry(countryCode, country.name);
 
         if (result?.meta?.code === 200 && result?.data) {
           const d = result.data;
@@ -195,7 +260,7 @@ export async function POST(request: NextRequest) {
             countryCode: country.code,
             number: fullNumber,
             cleanNumber: cleanNum,
-            rid: "26134",
+            operator: d.operator || "",
           };
 
           await tg("sendMessage", {
@@ -204,7 +269,7 @@ export async function POST(request: NextRequest) {
 
 \`${fullNumber}\`
 
-Operator: ${d.operator || "N/A"}
+📶 Operator: ${d.operator || "N/A"}
 🕐 Waiting for OTP... You will receive it automatically.`,
             parse_mode: "Markdown",
           });
